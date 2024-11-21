@@ -1,276 +1,322 @@
-# pgAdmin 4 
+# Tutorial on Q-SAST tools
+This is a tutorial on two query-based SAST (or Q-SAST) tools, namely CodeQL and Semgrep, as part of a workshop by NCSC-NL at Avans Hogeschool. A significant advantage of Q-SAST tools over conventional SAST tools is that the community can contribute to the Q-SAST's capabilities by writing their own rules. This makes it easier to quickly respond to newly discovered vulnerability classes. It also makes Q-SAST tools suitable for information-gathering during penetration tests and code reviews.
 
-pgAdmin 4 is a rewrite of the popular pgAdmin3 management tool for the
-PostgreSQL (http://www.postgresql.org) database. 
+## Preliminaries
+To properly follow this tutorial you should be able to run CodeQL queries and Semgrep OSS rules on the code included in this repository. There are several ways to do this, which are documented on the respective websites of CodeQL ([here](https://docs.github.com/en/code-security/codeql-cli/getting-started-with-the-codeql-cli/setting-up-the-codeql-cli) or [here](https://docs.github.com/en/code-security/codeql-for-vs-code/getting-started-with-codeql-for-vs-code/installing-codeql-for-vs-code)) and Semgrep ([here](https://semgrep.dev/docs/getting-started/quickstart)). I myself run CodeQL using the Visual Studio Code extension, and Semgrep OSS from the command line. Note that it is **not** necessary to create a CodeQL database locally. You can simply import the CodeQL database that is linked to this GitHub repository. 
 
-In the following documentation and examples, *$PGADMIN4_SRC/* is used to denote
-the top-level directory of a copy of the pgAdmin source tree, either from a
-tarball or a git checkout.
+## The goal
+The goal of this tutorial is to write rules for both CodeQL and Semgrep to discover the vulnerabilty [CVE-2022-4223](https://nvd.nist.gov/vuln/detail/CVE-2022-4223) in version 6.16 of the tool pgAdmin 4. The vulnerable code is included in this repository in the folder `pgAdmin4-REL-6_16`. For more information about pgAdmin 4 and this vulnerability, see [here](https://frycos.github.io/vulns4free/2022/12/02/rce-in-20-minutes.html). If you are really adventurous, and would like to try out running a vulnerable version of this software, go [here](https://github.com/vulhub/vulhub/tree/master/pgadmin/CVE-2022-4223).
 
-## Architecture
+Note that the default versions of both CodeQL and Semgrep OSS already include rules that detect this vulnerability. Nevertheless, it is a worthwile exercise to write your own rules, because you will obtain:
 
-pgAdmin 4 is written as a web application in Python, using jQuery and Bootstrap
-for the client side processing and UI. On the server side, Flask is being
-utilised.
+- A better understanding of how these Q-SAST tools work and how they compare to each other. 
+- A more in-depth understanding of the vulnerability at hand. This is particularly interesting because the vulnerability is similar to the vulnerabilities in Ivanti ([this one](https://nvd.nist.gov/vuln/detail/CVE-2023-46805) combined with [this one](https://nvd.nist.gov/vuln/detail/CVE-2024-21887)) discussed during the lecture.
+- Some feeling for how you can use these tools for pentesting and code review. 
 
-Although developed using web technologies, pgAdmin 4 can be deployed either on
-a web server using a browser, or standalone on a workstation. The runtime/
-subdirectory contains an NWjs based runtime application intended to allow this,
-which will execute the Python server and display the UI.
+Recall that the vulnerability we are researching arises because untrusted user data finds its way to a possible vulnerable function. This untrusted user data is called the *source*, and the vulnerable function is called the *sink*. A nice feature of Semgrep is that, if we specify the source and the sink, Semgrep can automatically search for a possible path between them. 
 
-## Building the Runtime
+### Part 1.1: Finding the source 
+pgAdmin 4 exposes itself to the internet by using the Python web framework [Flask](https://flask.palletsprojects.com/en/3.0.x/). In this framework, user data is accessed through the object `request`. 
 
-To build the runtime, the following packages must be installed:
+> **Exercise 1**. Write a Semgrep rule that finds all usages of the word `request`. 
+> <details>
+>  <summary>Hint 1</summary>
+>  You could use the following template
+>
+>  ```yaml
+>  rules:
+> - id: request-usages
+>  languages:
+>    - python
+>  message: The word 'request' occurs here.
+>  pattern: 
+>  severity: INFO
+>  ```
+>  What to put after `pattern:`?
+> </details>
+> <details>
+>  <summary>Hint 2</summary>
+> You should get 766 findings.
+> </details> 
 
-* NodeJS 12+
-* Yarn
-
-Change into the runtime directory, and run *yarn install*. This will install the
-dependencies required.
-
-In order to use the runtime in a development environment, you'll need to copy
-*dev_config.json.in* file to *dev_config.json*, and edit the paths to the Python
-executable and *pgAdmin.py* file, otherwise the runtime will use the default
-paths it would expect to find in the standard package for your platform.
-
-You can then execute the runtime by running something like:
-
-```bash
-node_modules/nw/nwjs/nw .
+Note that line 266 of the file `web/pgadmin/browser/utils.py` contains the following code:
+```python
+http_method = flask.request.method.lower()
 ```
+However, simply searching for the pattern `request` does not match this line. 
+> **Exercise 2**. Write a Semgrep rule that finds all usages of the object `flask.request`.
+> <details>
+> <summary>Hint 1</summary>
+> You should get 775 findings.
+> </details> 
 
-or on macOS:
-
-```bash
-node_modules/nw/nwjs/nwjs.app/Contents/MacOS/nwjs .
+Notice how you get more findings than before? This is because semgrep takes the semantics of the code into account. It therefore knows that if a file contains
+```python
+from flask import request
 ```
+then every usage of `request` is in fact one of `flask.request`.
 
-# Configuring the Python Environment
+Since some attributes of `flask.request` are more likely to contain untrusted user-input, it might be useful to keep track of the specific attribute that our rule matches. 
+> **Exercise 3**. Write a Semgrep rule that finds and displays all usages of attributes of the object `flask.request`.
+> <details>
+> <summary>Hint 1</summary>
+> Use a metavariable.
+> </details> 
+> <details>
+> <summary>Hint 2</summary>
+> You could use the following template
+>
+> ```yaml
+> rules:
+> - id: flask-request-attributes
+>   languages:
+>     - python
+>   message: The attribute '$ATTRIBUTE' of the object 'flask.request' is used here.
+>   pattern: 
+>   severity: INFO
+> ```
+>  What to put after `pattern:`?
+> </details>
+> <details>
+> <summary>Hint 3</summary>
+> You should get 762 findings.
+> </details> 
 
-In order to run the Python code, a suitable runtime environment is required.
-Python version 3.6 and later are currently supported. It is recommended that a
-Python Virtual Environment is setup for this purpose, rather than using the
-system Python environment. On Linux and Mac systems, the process is fairly
-simple - adapt as required for your distribution:
+### Part 1.2: Finding the sink 
+The sink of our vulnerability is the module `subprocess`, which is used to spawn new processes.
+> **Exercise 4**. Write a Semgrep rule that finds and displays calls to *methods* of the module `subprocess`.
+> <details>
+> <summary>Hint 1</summary>
+> Again use a metavariable, but now also use ellipses (...). 
+> </details> 
+> <details>
+> <summary>Hint 2</summary>
+> You could use the following template
+>
+> ```yaml
+> rules:
+> - id: subprocess-method-calls
+>   languages:
+>     - python
+>   message: The method '$METHOD' of the module 'subprocess' is used here.
+>   pattern: 
+>   severity: INFO
+> ```
+>  What to put after `pattern:`?
+> </details>
+> <details>
+> <summary>Hint 3</summary>
+> You should get 16 findings.
+> </details> 
 
-1. Create a virtual environment in an appropriate directory. The last argument is
-   the name of the environment; that can be changed as desired:
+### Part 1.3: Taint tracking from source to sink
+It's now time to make the connection from source to sink. 
+> **Exercise 5**. Write a Semgrep rule that uses taint mode to detect the flow of untrusted data from `flask.request` into a `subprocess` method call. 
+> <details>
+> <summary>Hint 1</summary>
+> You could use the following template
+>
+>```yaml
+> rules:
+> - id: request-subprocess-taint-tracking
+>  languages:
+>    - python
+>  message: Untrusted user-input flows from 'flask.request.$ATTRIBUTE' into a call to 'subprocess.$METHOD'.
+>  mode: taint
+>  pattern-sources:
+>    - pattern: 
+>  pattern-sinks:
+>    - pattern: 
+>  severity: WARNING
+> ```
+>  What to put after each `pattern:`?
+> </details>
 
-   ```bash
-   $ python3 -m venv venv
-   ```
-   
-2. Now activate the virtual environment:
-
-   ```bash
-   $ source venv/bin/activate
-   ```
-   
-3. Some of the components used by pgAdmin require a very recent version of *pip*,
-   so update that to the latest:
-   
-   ```bash
-   $ pip install --upgrade pip
-   ```
-   
-4. Ensure that a PostgreSQL installation's bin/ directory is in the path (so
-   pg_config can be found for building psycopg2), and install the required
-   packages:
-
-   ```bash
-   (venv) $ PATH=$PATH:/usr/local/pgsql/bin pip install -r $PGADMIN4_SRC/requirements.txt
-   ```
-   
-   If you are planning to run the regression tests, you also need to install
-   additional requirements from web/regression/requirements.txt:
-
-   ```bash
-   (venv) $ pip install -r $PGADMIN4_SRC/web/regression/requirements.txt
-   ```
-   
-5. Create a local configuration file for pgAdmin. Edit
-   $PGADMIN4_SRC/web/config_local.py and add any desired configuration options
-   (use the config.py file as a reference - any settings duplicated in
-   config_local.py will override those in config.py). A typical development
-   configuration may look like:
-   
-    ```python
-    from config import *
-
-    # Debug mode
-    DEBUG = True
-
-    # App mode
-    SERVER_MODE = True
-
-    # Enable the test module
-    MODULE_BLACKLIST.remove('test')
-
-    # Log
-    CONSOLE_LOG_LEVEL = DEBUG
-    FILE_LOG_LEVEL = DEBUG
-
-    DEFAULT_SERVER = '127.0.0.1'
-
-    UPGRADE_CHECK_ENABLED = True
-
-    # Use a different config DB for each server mode.
-    if SERVER_MODE == False:
-        SQLITE_PATH = os.path.join(
-            DATA_DIR,
-            'pgadmin4-desktop.db'
-        )
-    else:
-        SQLITE_PATH = os.path.join(
-            DATA_DIR,
-            'pgadmin4-server.db'
-        )
-   ```
-   
-   This configuration allows easy switching between server and desktop modes
-   for testing.
-
-6. The initial setup of the configuration database is interactive in server
-   mode, and non-interactive in desktop mode. You can run it either by
-   running:
-
-   ```bash
-   (venv) $ python3 $PGADMIN4_SRC/web/setup.py
-   ```
-   
-   or by starting pgAdmin 4:
-
-   ```bash
-   (venv) $ python3 $PGADMIN4_SRC/web/pgAdmin4.py
-   ```
-   
-   Whilst it is possible to automatically run setup in desktop mode by running
-   the runtime, that will not work in server mode as the runtime doesn't allow
-   command line interaction with the setup program.
-
-At this point you will be able to run pgAdmin 4 from the command line in either
-server or desktop mode, and access it from a web browser using the URL shown in
-the terminal once pgAdmin has started up.
-
-Setup of an environment on Windows is somewhat more complicated unfortunately,
-please see *pkg/win32/README.txt* for complete details.
-
-# Building the Web Assets
-
-pgAdmin is dependent on a number of third party Javascript libraries. These,
-along with it's own Javascript code, SCSS/CSS code and images must be
-compiled into a "bundle" which is transferred to the browser for execution
-and rendering. This is far more efficient than simply requesting each
-asset as it's needed by the client.
-
-To create the bundle, you will need the 'yarn' package management tool to be
-installed. Then, you can run the following commands on a *nix system to
-download the required packages and build the bundle:
-
-```bash
-(venv) $ cd $PGADMIN4_SRC
-(venv) $ make install-node
-(venv) $ make bundle
+Running this final rule should result in precisely 1 match. You can use the command-line flag ``--dataflow-traces`` to track how the data flows from the source to the sink. On my machine, this gives the following output:
 ```
-
-On Windows systems (where "make" is not available), the following commands
-can be used:
-
+pgadmin4-REL-6_16/web/pgadmin/misc/__init__.py
+    ❯❱ semgrep-rules.request-subprocess-taint-tracking
+          Untrusted user-input flows from 'flask.request.data' into a
+          call to 'subprocess.getoutput'.                            
+                                                                     
+          224┆ subprocess.getoutput('"{0}"  
+               --version'.format(full_path))
+    
+    
+          Taint comes from:
+    
+          205┆ data = request.data.decode('utf-8')
+    
+    
+          Taint flows through these intermediate variables:
+    
+          205┆ data = request.data.decode('utf-8')
+    
+          213┆ binary_path =                            
+               replace_binary_path(data['utility_path'])
+    
+          216┆ full_path = os.path.abspath(
+    
+    
+                This is how taint reaches the sink:
+    
+          224┆ subprocess.getoutput('"{0}"  
+               --version'.format(full_path))
 ```
-C:\> cd $PGADMIN4_SRC\web
-C:\$PGADMIN4_SRC\web> yarn install
-C:\$PGADMIN4_SRC\web> yarn run bundle
-```
+If you get something similar: well done! The rule we've now developed works in this particular case and demonstrates some of the key features of Semgrep. It is, however, still far from refined and may give many false-positives in practice. For a more robust solution, I recommend you to check out [the corresponding rule in the official Semgrep rule database](https://github.com/semgrep/semgrep-rules/blob/develop/python/flask/security/injection/subprocess-injection.yaml). 
 
-# Creating pgAdmin themes
+## Part 2: writing your own CodeQL query
 
-To create a pgAdmin theme, you need to create a directory under
-*web/pgadmin/static/scss/resources*.
-Copy the sample file *_theme.variables.scss.sample* to the new directory and
-rename it to *_theme.variables.scss*. Change the desired hexadecimal values of
-the colors and bundle pgAdmin. You can also add a preview image in the theme
-directory with the name as *\<dir name>_preview.png*. It is recommended that the
-preview image should not be larger in size as it may take time to load on slow
-networks. Run the *yarn run bundle* and you're good to go. No other changes are
-required, pgAdmin bundle will read the directory and create other required
-entries to make them available in preferences.
+We will now repeat the same process, but then to construct a CodeQL query. As you will see, this can be a bit trickier than writing a Semgrep rule. Also - at least on my machine - running a CodeQL query takes more time, which slows down the testing process. However, CodeQL as a programming language has more features, and the reuslts are often more accurate.
 
-The name of the theme is derived from the directory name. Underscores (_) and
-hyphens (-) will be replaced with spaces and the result will be camel cased.
+### Part 2.1: Finding the source 
+Recall from Part 1 that we need to find accesses of attributes of the `flask.request` object. There is a CodeQL module, called [API graphs](https://codeql.github.com/docs/codeql-language-guides/using-api-graphs-in-python/), designed specifically for such external library accesses. While this module is useful in practice, we will for educational purposes direcly write a query that does not depend on it.
+> **Exercise 6**. Write a CodeQL query that finds all instances where an attribute of an object named `request` is accessed.
+> <details>
+>  <summary>Hint 1</summary>
+>  You could use the following template
+>
+>```javascript
+> /**
+> * @id flask-request-attribute-acccess
+> * @severity error
+> * @kind problem
+> */
+>
+> import python
+>
+> from Attribute a 
+> where 
+> select a, "request." + a.getAttr()
+> ```
+>  What to put after `where`?
+> </details>
+> <details>
+>  <summary>Hint 2</summary>
+> You should get 754 results.
+> </details> 
 
-# Building the documentation
+Let's use CodeQL's object-oriented features and create a class. 
 
-In order to build the docs, an additional Python package is required in the
-virtual environment. This can be installed with the pip package manager:
+> **Exercise 7**. Create a CodeQL class that contains all findings from the previous exercise.
+> <details>
+>  <summary>Hint 1</summary>
+>  You could use the following template
+>
+>```javascript
+> /**
+> * @id flask-request-attribute-acccess
+> * @severity error
+> * @kind problem
+> */
+>
+> import python
+>
+> class RequestAttribute extends Attribute {
+>     RequestAttribute() {
+>        
+>     }
+>  }
+> 
+>  from RequestAttribute ra
+>  select ra, "request." + ra.getAttr()
+> ```
+>  What to put in the body of the class constructor?
+> </details>
 
-```bash
-$ source venv/bin/activate
-(venv) $ pip install Sphinx
-```
+### Part 2.2: Finding the sink 
+> **Exercise 8**. Write a CodeQL query that finds all instances where an attribute of an object named `subprocess` is accessed.
+> <details>
+>  <summary>Hint 1</summary>
+>  Compare to Exercise 6.
+> </details> 
+> <details>
+>  <summary>Hint 2</summary>
+> You should get 14 results.
+> </details> 
+This query also finds fields, like `subprocess.PIPE`, whereas we are only interested in function calls. For this we can use the `Call` class. 
+> **Exercise 9**. Create a CodeQL predicate that selects amongst all expressions of type `Call` those that are calls to functions of the subprocess module. 
+> <details>
+>  <summary>Hint 1</summary>
+>  Use CodeQL's `exist` quantifier.
+> </details> 
+> <details>
+>  <summary>Hint 2</summary>
+>  You could use the following template
+>
+>```javascript
+> /**
+> * @id subprocess-call-predicate
+> * @severity error
+> * @kind problem
+> */
+>
+> import python
+>
+> predicate isSubprocessCall(Call c) {
+>   
+> }
+>
+> from Call c where
+> isSubprocessCall(c)
+> select c, "subprocess call"
+> ```
+>  What to put in the body of the predicate?
+> </details>
+> <details>
+>  <summary>Hint 3</summary>
+> You should get 9 findings.
+> </details> 
 
-The docs can then be built using the Makefile in *$PGADMIN4_SRC*, e.g.
+### Part 2.3: Taint tracking from source to sink
+> **Exercise 10**. Write a CodeQL query that detects the flow of untrusted data from  a `request` attribute into a `subprocess` method call. 
+> <details>
+> <summary>Hint 1</summary>
+> You could use the following template
+>
+>```javascript
+> /**
+> * @kind path-problem
+> * @problem.severity error
+> * @id taint-tracking-request-subprocess
+> */
+>
+> import python
+> import semmle.python.dataflow.new.DataFlow
+> import semmle.python.dataflow.new.TaintTracking
+> import semmle.python.ApiGraphs
+> import semmle.python.dataflow.new.RemoteFlowSources
+> import MyFlow::PathGraph
+>
+>
+> private module MyConfig implements DataFlow::ConfigSig {
+>   predicate isSource(DataFlow::Node source) {
+>     
+>   }
+>
+>   predicate isSink(DataFlow::Node sink) {
+>    
+>   }
+> }
+>
+> module MyFlow = TaintTracking::Global<MyConfig>; 
+>
+> from MyFlow::PathNode source, MyFlow::PathNode sink
+> where MyFlow::flowPath(source, sink)
+> select sink.getNode(), source, sink, "subprocess sink called with untrusted data from request"
+> ```
+>  What to put in each predicate body?
+> </details>
+> <details>
+>  <summary>Hint 2</summary>
+> Use the `.asExpr()` method of the `DataFlow::Node` class. 
+> </details> 
+Again, our query works perfectly for our target pgAdmin 4, but is generally not as accurate as the [official CodeQL query](https://github.com/github/codeql/blob/main/python/ql/src/Security/CWE-078/CommandInjection.ql) for this vulnerability. 
 
-```bash
-(venv) $ make docs
-```
+## Conclusion and further reading
 
-The output can be found in *$PGADMIN4_SRC/docs/en_US/_build/html/index.html*
-
-# Building packages
-
-Most packages can be built using the Makefile in $PGADMIN4_SRC, provided all
-the setup and configuration above has been completed.
-
-To build a source tarball:
-
-```bash
-(venv) $ make src
-```
-
-To build a PIP Wheel, activate either a Python 3 virtual environment, configured 
-with all the required packages, and then run:
-
-```bash
-(venv) $ make pip
-```
-
-To build the macOS AppBundle, please see *pkg/mac/README*.
-
-To build the Windows installer, please see *pkg/win32/README.txt*.
-# Create Database Migrations
-
-In order to make changes to the SQLite DB, navigate to the 'web' directory:
-
-```bash
-(venv) $ cd $PGADMIN4_SRC/web
-```
-
-Create a migration file with the following command:
-
-```bash
-(venv) $ FLASK_APP=pgAdmin4.py flask db revision
-```
-
-This will create a file in: $PGADMIN4_SRC/web/migrations/versions/ .
-Add any changes to the 'upgrade' function.
-Increment the SCHEMA_VERSION in $PGADMIN4_SRC/web/pgadmin/model/__init__.py file.
-
-There is no need to increment the SETTINGS_SCHEMA_VERSION.
-
-# Support
-
-See https://www.pgadmin.org/support/ for support options.
-
-# Project info
-
-A GitHub project for pgAdmin 4 can be found at the address below:
-
-https://github.com/pgadmin-org/pgadmin4
-
-Please submit any changes as Pull Requests against the *master* branch of the
-*pgadmin-org/pgadmin4* repository.
-
-If you wish to discuss pgAdmin 4, or contribute to the project, please use the
-pgAdmin Hackers mailing list:
-
-pgadmin-hackers@postgresql.org
+I hoped you enjoyed this tutorial! For questions, feel free to reach out to myfirstname.mylastname@ncsc.nl. Here are some resources that might be interesting for further reading:
+- Technical information about the vulnerability in Ivanti (technical): https://www.assetnote.io/resources/research/high-signal-detection-and-exploitation-of-ivantis-pulse-connect-secure-auth-bypass-rce
+- Also about the vulnerability in Ivanti, but from a more threat analytical perspective: https://cloud.google.com/blog/topics/threat-intelligence/suspected-apt-targets-ivanti-zero-day/
+- Using CodeQL for offensive security: https://www.youtube.com/watch?v=-bJ2Ioi7Icg
+- An empirical study on the effectiveness of query-based SAST-tools (paywall): https://ieeexplore.ieee.org/document/10400834
